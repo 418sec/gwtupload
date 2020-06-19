@@ -37,6 +37,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.ResourceBundle;
+import java.util.concurrent.TimeUnit;
 
 import javax.servlet.Servlet;
 import javax.servlet.ServletConfig;
@@ -149,6 +150,7 @@ public class UploadServlet extends HttpServlet implements Servlet {
 
   protected static final int DEFAULT_REQUEST_LIMIT_KB = 5 * 1024 * 1024;
   protected static final int DEFAULT_SLOW_DELAY_MILLIS = 300;
+  protected static final int DEFAULT_MAX_UPLOAD_DELAY_MS = (int) TimeUnit.MINUTES.convert(1, TimeUnit.MILLISECONDS);
 
   protected static final String XML_CANCELED_TRUE = "<" + TAG_CANCELED + ">true</" + TAG_CANCELED + ">";
   protected static final String XML_DELETED_TRUE = "<" + TAG_DELETED + ">true</" + TAG_DELETED + ">";
@@ -497,9 +499,11 @@ public class UploadServlet extends HttpServlet implements Servlet {
 
   protected long maxSize = DEFAULT_REQUEST_LIMIT_KB;
 
-  protected  long maxFileSize = DEFAULT_REQUEST_LIMIT_KB;
+  protected long maxFileSize = DEFAULT_REQUEST_LIMIT_KB;
 
   protected int uploadDelay = 0;
+
+  protected int maxUploadDelay = DEFAULT_MAX_UPLOAD_DELAY_MS;
 
   protected boolean useBlobstore = false;
 
@@ -594,6 +598,14 @@ public class UploadServlet extends HttpServlet implements Servlet {
       }
     }
 
+    String maxDelayParam = getInitParameter("maxDelay");
+    if (maxDelayParam != null) {
+      try {
+        maxUploadDelay = Integer.parseInt(maxDelayParam);
+      } catch (NumberFormatException e) {
+      }
+    }
+
     String timeout = getInitParameter("noDataTimeout");
     if (timeout != null){
       try {
@@ -624,7 +636,25 @@ public class UploadServlet extends HttpServlet implements Servlet {
    * @return the appropriate listener
    */
   protected AbstractUploadListener createNewListener(HttpServletRequest request) {
-    int delay = request.getParameter("nodelay") != null ? 0 : uploadDelay;
+    int delay = uploadDelay;
+    try {
+      final String requestParamDelay = request.getParameter(PARAM_DELAY);
+      // Use the delay specified in the request if it is a valid value (between 0 and maxUploadDelay).
+      // If the delay parameter wasn't specified, use the default uploadDelay configured on the server.
+      delay = requestParamDelay != null ? Integer.parseInt(requestParamDelay) : uploadDelay;
+      if (delay < 0) {
+        delay = uploadDelay;
+      }
+      if (delay > maxUploadDelay) {
+        delay = maxUploadDelay;
+      }
+    } catch (NumberFormatException e) {}
+
+    // If nodelay was specified, it overrides the delay parameter.
+    if (request.getParameter("nodelay") != null) {
+      delay = 0;
+    }
+
     if (isAppEngine()) {
       return new MemoryUploadListener(delay, getContentLength(request));
     } else {
@@ -903,12 +933,11 @@ public class UploadServlet extends HttpServlet implements Servlet {
    */
   protected String parsePostRequest(HttpServletRequest request, HttpServletResponse response) {
 
+    long requestMaxSize = maxSize;
     try {
-      String delay = request.getParameter(PARAM_DELAY);
       String maxFilesize = request.getParameter(PARAM_MAX_FILE_SIZE);
-      maxSize = maxFilesize != null && maxFilesize.matches("[0-9]*") ? Long.parseLong(maxFilesize) : maxSize;
-      uploadDelay = Integer.parseInt(delay);
-    } catch (Exception e) { }
+      requestMaxSize = maxFilesize != null && maxFilesize.matches("[0-9]*") ? Long.parseLong(maxFilesize) : maxSize;
+    } catch (NumberFormatException e) { }
 
     HttpSession session = request.getSession();
 
@@ -938,7 +967,7 @@ public class UploadServlet extends HttpServlet implements Servlet {
       // Create the factory used for uploading files,
       FileItemFactory factory = getFileItemFactory(getContentLength(request));
       ServletFileUpload uploader = new ServletFileUpload(factory);
-      uploader.setSizeMax(maxSize);
+      uploader.setSizeMax(requestMaxSize);
       uploader.setFileSizeMax(maxFileSize);
       uploader.setProgressListener(listener);
 
